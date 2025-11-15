@@ -4,29 +4,89 @@ from datetime import datetime
 import yfinance as yf
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
+from io import StringIO
+import time
 
 def fetch_sp500_symbols():
-    """Fetch S&P 500 constituent symbols from Wikipedia"""
+    """Fetch S&P 500 constituent symbols from Wikipedia with retry logic"""
     print("Fetching S&P 500 constituents from Wikipedia...")
     
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+    }
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    
+    # Try Wikipedia with retries
+    for attempt in range(3):
+        try:
+            print(f"Attempt {attempt + 1}/3...")
+            response = requests.get(url, headers=headers, timeout=30)
+            
+            if response.status_code == 200:
+                # Use StringIO to avoid FutureWarning
+                tables = pd.read_html(StringIO(response.text))
+                print(f"Found {len(tables)} tables on the page")
+                
+                # Find the right table - look for one with proper columns and data
+                for i, df in enumerate(tables):
+                    print(f"\nChecking table {i}: shape={df.shape}, columns={df.columns.tolist()}")
+                    
+                    # Skip tables that are too small or have error messages
+                    if df.shape[0] < 100:  # S&P 500 should have ~500 rows
+                        print(f"  Skipping - too few rows ({df.shape[0]})")
+                        continue
+                    
+                    # Look for Symbol column (case insensitive)
+                    symbol_col = None
+                    for col in df.columns:
+                        if isinstance(col, str) and 'symbol' in col.lower():
+                            symbol_col = col
+                            break
+                    
+                    if symbol_col:
+                        print(f"  Found Symbol column: '{symbol_col}'")
+                        symbols = df[symbol_col].tolist()
+                        # Clean symbols (BRK.B -> BRK-B) and filter out NaN
+                        symbols = [str(s).replace('.', '-') for s in symbols if pd.notna(s) and str(s).strip()]
+                        
+                        # Validate - should have stock-like symbols
+                        if len(symbols) > 100 and all(len(str(s)) <= 5 for s in symbols[:10]):
+                            print(f"✓ Fetched {len(symbols)} S&P 500 symbols from table {i}")
+                            return symbols
+                
+                print("Could not find valid S&P 500 table")
+                
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed: {e}")
+            if attempt < 2:
+                wait_time = (attempt + 1) * 5
+                print(f"Waiting {wait_time} seconds before retry...")
+                time.sleep(wait_time)
+    
+    # Fallback: Use yfinance to get SPY holdings
+    print("\nTrying fallback method: Fetching from SPY ETF...")
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-        }
-        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            tables = pd.read_html(response.text)
-            df = tables[0]
-            symbols = df['Symbol'].tolist()
-            # Clean symbols (BRK.B -> BRK-B)
-            symbols = [s.replace('.', '-') for s in symbols]
-            print(f"✓ Fetched {len(symbols)} S&P 500 symbols")
+        spy = yf.Ticker("SPY")
+        holdings = spy.get_holdings()
+        if holdings is not None and len(holdings) > 0:
+            symbols = holdings['Symbol'].tolist()
+            symbols = [str(s).replace('.', '-') for s in symbols if pd.notna(s)]
+            print(f"✓ Fetched {len(symbols)} symbols from SPY holdings")
             return symbols
     except Exception as e:
-        print(f"Error: {e}")
-        return []
+        print(f"Fallback method failed: {e}")
+    
+    # Last resort: Return a hardcoded list of major S&P 500 stocks
+    print("\nUsing backup list of major S&P 500 stocks...")
+    backup_symbols = [
+        'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'LLY', 'AVGO',
+        'JPM', 'V', 'UNH', 'XOM', 'WMT', 'MA', 'JNJ', 'PG', 'COST', 'HD',
+        'ORCL', 'ABBV', 'MRK', 'KO', 'CVX', 'BAC', 'NFLX', 'PEP', 'CRM', 'AMD',
+        'ADBE', 'TMO', 'MCD', 'ACN', 'CSCO', 'LIN', 'ABT', 'WFC', 'TMUS', 'DHR',
+        'DIS', 'TXN', 'INTU', 'VZ', 'PM', 'CMCSA', 'NEE', 'QCOM', 'IBM', 'AMGN'
+    ]
+    print(f"✓ Using {len(backup_symbols)} major stocks")
+    return backup_symbols
 
 def get_stock_info(symbol):
     """Fetch market cap and price for a single symbol"""
